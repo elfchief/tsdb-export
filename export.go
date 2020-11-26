@@ -1,9 +1,8 @@
 package main
 
-// Yes, it's ugly. See README
-
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -12,10 +11,8 @@ import (
 	"strings"
 )
 
-// CONFIGURE HERE
-var totalRangeStart = 1459814400 // 2016-04-05 00:00:00
-var totalRangeEnd = 1503792000   // 2017-08-27 00:00:00
-var tsdbEndpoint = "http://opentsdb.lupine.org:4244"
+// Configuration moved to command line arguments
+var tsdbEndpoint string
 
 // Useful utility code
 func check(e error) {
@@ -42,7 +39,8 @@ func copymap(from map[string]string) map[string]string {
 type metricList []string
 
 func getMetricList() []string {
-	url := fmt.Sprintf("%s/api/suggest?type=metrics&max=999999", tsdbEndpoint)
+	// 16.777.216 is the max number of metric name UIDs in OpenTSDB
+	url := fmt.Sprintf("%s/api/suggest?type=metrics&max=16777216", tsdbEndpoint)
 
 	resp, err := http.Get(url)
 	check(err)
@@ -60,7 +58,7 @@ func getMetricList() []string {
 }
 
 // Add in: Start time, end time, aggregation function, metric name, tags
-var metricUri = "%s/api/query?start=%s&end=%s&m=%s:%s{%s}"
+var metricURI = "%s/api/query?start=%s&end=%s&m=%s:%s{%s}"
 
 type metricResponse struct {
 	Metric        string                 `json:"metric"`
@@ -72,7 +70,7 @@ type metricResponse struct {
 // Given a metric URL, get it and unmarshal it
 type metricResponses []metricResponse
 
-func getMetricFromUrl(url string) metricResponses {
+func getMetricFromURL(url string) metricResponses {
 	resp, err := http.Get(url)
 	check(err)
 
@@ -83,7 +81,7 @@ func getMetricFromUrl(url string) metricResponses {
 	var mr metricResponses
 	err = json.Unmarshal(body, &mr)
 	if err != nil {
-		log("ERROR: Can't umarshal json body: %v\n", err)
+		log("ERROR: Can't unmarshal json body: %v\n", err)
 		log("Body:\n%s\n", body)
 		panic(err)
 	}
@@ -106,8 +104,8 @@ func tagFold(tagList map[string]string) []string {
 
 // Get one or more metric series given a specific set of tags
 func getMetricSet(metricName string, start string, end string, tagList map[string]string) metricResponses {
-	url := fmt.Sprintf(metricUri, tsdbEndpoint, start, end, "sum", metricName, strings.Join(tagFold(tagList), ","))
-	m := getMetricFromUrl(url)
+	url := fmt.Sprintf(metricURI, tsdbEndpoint, start, end, "sum", metricName, strings.Join(tagFold(tagList), ","))
+	m := getMetricFromURL(url)
 
 	return m
 }
@@ -152,12 +150,27 @@ func drillMetric(name string, start string, end string, tagList map[string]strin
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		log("usage: %s <metricname|--list>\n", os.Args[0])
+
+	start := flag.Int("start", 0, "Unix timestamp of start of metrics, ex. 1459814400 (2016-04-05 00:00:00)")
+	end := flag.Int("end", 0, "Unix timestamp of end of metrics, ex. 1503792000 (2017-08-27 00:00:00)")
+	timeRange := flag.Int("querylength", 86400, "Break down queries to increments of this length (in seconds)")
+	flag.StringVar(&tsdbEndpoint, "url", "http://localhost:4242", "OpenTSDB URL")
+	list := flag.Bool("list", false, "Extract a list of all metrics")
+	metric := flag.String("metric", "", "Metric name to export")
+
+	var Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
+		flag.PrintDefaults()
+	}
+
+	flag.Parse()
+
+	if len(os.Args) < 5 {
+		Usage()
 		os.Exit(1)
 	}
 
-	if os.Args[1] == "--list" {
+	if *list == true {
 		ml := getMetricList()
 		for _, v := range ml {
 			fmt.Println(v)
@@ -165,19 +178,23 @@ func main() {
 		os.Exit(0)
 	}
 
-	metric := os.Args[1]
-	start := totalRangeStart
-	for {
-		if start >= totalRangeEnd {
-			break
-		}
+	if *end == 0 || *start == 0 || *start >= *end {
+		fmt.Fprintf(os.Stderr, "Both -start and -end needs to be specified, also -start needs to be less than -end.\n")
+		os.Exit(1)
+	}
 
-		end := start + (86400 * 7)
-		if end > totalRangeEnd {
-			end = totalRangeEnd
+	if *metric == "" {
+		fmt.Fprintf(os.Stderr, "-metric needs to be specified.\n")
+		os.Exit(1)
+	}
+
+	log("INFO: start: %d, end: %d\n", *start, *end)
+	for currentPosition, lastPosition := *end-*timeRange, *end; *start <= currentPosition+*timeRange; lastPosition, currentPosition = currentPosition, currentPosition-*timeRange {
+		// safe guard, so we don't query before specified time range.
+		if currentPosition < *start {
+			currentPosition = *start - 1
 		}
-		log("INFO: Processing metric %s, time range %d to %d\n", metric, start, end)
-		drillMetric(metric, strconv.Itoa(start), strconv.Itoa(end), map[string]string{})
-		start = end
+		log("INFO: Processing metric %s, time range %d to %d\n", *metric, currentPosition, lastPosition)
+		drillMetric(*metric, strconv.Itoa(currentPosition), strconv.Itoa(lastPosition), map[string]string{})
 	}
 }

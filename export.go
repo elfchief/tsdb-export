@@ -165,7 +165,7 @@ func main() {
 
 	flag.Parse()
 
-	if len(os.Args) < 5 {
+	if len(os.Args) < 5 && *list == false {
 		Usage()
 		os.Exit(1)
 	}
